@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "referralRewardsClaimed" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "User" ADD COLUMN "rewardClaimed" BOOLEAN NOT NULL DEFAULT false;

@@ -1,0 +1,73 @@
+name: Production Health Check
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Check Backend Health
+        id: backend
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://lottery-backend-gm4j.onrender.com/api/health)
+          echo "status=$response" >> $GITHUB_OUTPUT
+          if [ "$response" != "200" ]; then
+            echo "❌ Backend health check failed with status: $response"
+            exit 1
+          fi
+          echo "✅ Backend is healthy (status: $response)"
+
+      - name: Check API Endpoints
+        run: |
+          echo "Testing /api/lottery/list..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://lottery-backend-gm4j.onrender.com/api/lottery/list)
+          if [ "$response" != "200" ]; then
+            echo "❌ Lottery list endpoint failed with status: $response"
+            exit 1
+          fi
+          echo "✅ Lottery list endpoint working"
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = '🚨 Production Health Check Failed';
+            const body = `
+            ## Automated Health Check Alert
+
+            **Time:** ${new Date().toISOString()}
+            **Status:** Backend appears to be down or unhealthy
+
+            ### Actions to take:
+            1. Check Render dashboard for errors
+            2. Review recent deployments
+            3. Check database connectivity
+
+            This issue was automatically created by the health check workflow.
+            `;
+
+            // Check if similar issue exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'health-check-alert'
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['bug', 'urgent', 'health-check-alert']
+              });
+            }

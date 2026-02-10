@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "isBlocked" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "User" ADD COLUMN "blockReason" TEXT;
+ALTER TABLE "User" ADD COLUMN "blockedAt" TIMESTAMP(3);

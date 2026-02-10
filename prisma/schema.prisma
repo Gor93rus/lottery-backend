@@ -1,0 +1,764 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// User model - Telegram users with TON wallet
+model User {
+  id               String   @id @default(uuid())
+  telegramId       String?  @unique
+  username         String?
+  firstName        String?
+  lastName         String?
+  photoUrl         String?
+  tonWallet        String?
+  tonWalletVersion String?  @default("v4")
+  balance          Float    @default(0)
+  referralCode     String   @unique @default(uuid())
+  referredBy       String?
+  referralRewardsClaimed Float @default(0)
+  rewardClaimed    Boolean  @default(false)
+  totalSpent       Float    @default(0)
+  totalWon         Float    @default(0)
+  level            Int      @default(1)
+  experience       Int      @default(0)
+  streak           Int      @default(0)
+  lastActiveAt     DateTime @default(now())
+  isBlocked        Boolean  @default(false)
+  blockReason      String?
+  blockedAt        DateTime?
+  
+  // Notification settings
+  notifyDrawReminder    Boolean @default(true)
+  notifyDrawResults     Boolean @default(true)
+  notifyReferrals       Boolean @default(true)
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tickets       Ticket[]
+  transactions  Transaction[]
+  notifications Notification[]
+  payouts       Payout[]
+  depositMemos  DepositMemo[]
+
+  @@index([telegramId])
+  @@index([tonWallet])
+  @@index([referralCode])
+}
+
+// Lottery model - Weekend Special configuration
+model Lottery {
+  id              String  @id @default(uuid())
+  slug            String  @unique
+  name            String
+  description     String?
+  numbersCount    Int     @default(5) // How many numbers to pick
+  numbersMax      Int     @default(36) // Maximum number value
+  ticketPrice     Float   @default(1) // Price in TON
+  ticketPriceNano String  @default("1000000000") // Price in nanotons (1 TON = 1e9 nanotons)
+  jackpot         Float   @default(500) // Current jackpot in TON
+  drawTime        String  @default("18:00") // Time of day for draws
+  drawTimezone    String  @default("Europe/Moscow")
+  active          Boolean @default(true)
+  featured        Boolean @default(false)
+  currency        String  @default("TON") // "TON" | "USDT"
+
+  // Prize structure (stored as JSON)
+  prizeStructure Json @default("{\"5\": 500, \"4\": 50, \"3\": 5, \"2\": 0.5, \"1\": \"free_ticket\"}")
+
+  // Phase 3: Draw automation fields
+  accumulatedJackpot Float  @default(0) // Rollover jackpot accumulation
+  baseJackpot        Float  @default(1000) // Base jackpot amount
+  drawFrequency      String @default("DAILY") // HOURLY, DAILY, WEEKLY
+  drawHour           Int    @default(18) // Hour for scheduled draws (0-23)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets          Ticket[]
+  draws            Draw[]
+  fund             LotteryFund[]
+  payoutConfig     LotteryPayoutConfig?
+  drawSchedule     DrawSchedule?
+  fundTransactions FundTransaction[]
+
+  @@index([slug])
+  @@index([active])
+}
+
+// Ticket model - User lottery tickets
+model Ticket {
+  id          String  @id @default(uuid())
+  lotteryId   String
+  lottery     Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+  lotterySlug String // Store slug for easier querying
+  userId      String? // Optional for wallet-based purchases
+  user        User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  drawId      String?
+  draw        Draw?   @relation(fields: [drawId], references: [id], onDelete: SetNull)
+
+  numbers Int[] // Array of selected numbers
+
+  // Status: pending, active, won, lost, free
+  status String @default("active")
+
+  // Prize info
+  matchedNumbers Int     @default(0)
+  prizeAmount    Float   @default(0)
+  prizeClaimed   Boolean @default(false)
+
+  // Transaction reference
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  // TON transaction data for direct ticket purchase
+  txHash        String?  @unique // TON transaction hash (unique to prevent double-spend)
+  walletAddress String? // Wallet address that made the purchase
+  price         Float? // Purchase price in TON
+  currency      String?  @default("TON") // 'TON' | 'USDT'
+  purchasedAt   DateTime @default(now()) // Alias for createdAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payouts Payout[]
+
+  @@index([lotteryId])
+  @@index([lotterySlug])
+  @@index([userId])
+  @@index([drawId])
+  @@index([status])
+  @@index([txHash])
+  @@index([walletAddress])
+}
+
+// Draw model - Lottery draws with provably fair mechanism
+model Draw {
+  id        String  @id @default(uuid())
+  lotteryId String
+  lottery   Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+
+  drawNumber  Int // Sequential draw number
+  
+  // Status: scheduled, open, locked, drawing, calculating, paying, completed, cancelled
+  status String @default("scheduled")
+
+  // Timing
+  salesOpenAt  DateTime
+  salesCloseAt DateTime // drawTime - 30 min
+  drawTime     DateTime
+  lockedAt     DateTime?
+  drawnAt      DateTime?
+  completedAt  DateTime?
+  
+  // Legacy fields for backwards compatibility
+  scheduledAt DateTime // Maps to drawTime
+  executedAt  DateTime? // Maps to drawnAt
+
+  // Provably fair data
+  serverSeed              String?
+  serverSeedHash          String
+  clientSeed              String?
+  clientSeedBlockNumber   BigInt?
+  nonce                   Int     @default(autoincrement())
+
+  // Winning numbers
+  winningNumbers Int[]
+
+  // Statistics
+  totalTickets   Int   @default(0)
+  totalCollected Float @default(0)
+  currency       String
+
+  // Winner counts
+  winners5 Int @default(0)
+  winners4 Int @default(0)
+  winners3 Int @default(0)
+  winners2 Int @default(0)
+  winners1 Int @default(0)
+
+  // Payout amounts
+  jackpotAmount Float?
+  payout4Amount Float?
+  payout3Amount Float?
+  payout2Amount Float?
+  payout1Amount Float @default(0.1)
+
+  // Fund tracking
+  prizePoolSnapshot   Float?
+  jackpotPoolSnapshot Float?
+  toJackpot           Float?
+  toReserve           Float?
+
+  // Legacy fields for backwards compatibility
+  totalPrizePool    Float @default(0)
+  totalWinners      Int   @default(0)
+  totalPaid         Float @default(0)
+  payoutPoolSnapshot Float?
+  totalPaidOut      Float?
+  jackpotWon        Boolean @default(false)
+  jackpotRolledOver Float?
+  payoutStatus      String @default("pending")
+  
+  // Legacy provably fair (keeping for compatibility)
+  seedHash String? // Maps to serverSeedHash
+  seed     String? // Maps to serverSeed
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets      Ticket[]
+  payoutQueues PayoutQueue[]
+  payouts      Payout[]
+
+  @@unique([lotteryId, drawNumber])
+  @@index([lotteryId])
+  @@index([status])
+  @@index([drawTime])
+  @@index([scheduledAt])
+}
+
+// Transaction model - TON blockchain transactions
+model Transaction {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Transaction type: deposit, ticket_purchase, prize_claim, withdrawal, DEPOSIT, WITHDRAWAL
+  type String
+
+  // TON blockchain data
+  tonTxHash   String? @unique
+  tonAmount   Float
+  tonSender   String?
+  tonReceiver String?
+  tonComment  String?
+
+  // Internal reference
+  ticketId String?
+
+  // Status: pending, confirmed, failed, cancelled, PENDING, COMPLETED, FAILED
+  status String @default("pending")
+
+  // Metadata
+  metadata Json?
+
+  // Phase 4: Deposit/Withdrawal fields
+  amount      Float?
+  fee         Float?   @default(0)
+  currency    String?  @default("TON")
+  txHash      String?  @unique
+  fromAddress String?
+  toAddress   String?
+  memo        String?
+  error       String?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets Ticket[]
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([tonTxHash])
+  @@index([txHash])
+}
+
+// DepositMemo model - Unique deposit memos for tracking deposits
+model DepositMemo {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memo      String   @unique
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([memo])
+}
+
+// Notification model - User notifications
+model Notification {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Type: draw_result, prize_won, ticket_purchased, system
+  type String
+
+  title   String
+  message String
+
+  // Optional link/action
+  link        String?
+  actionLabel String?
+  
+  // Additional data
+  data Json?
+
+  read Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+}
+
+// AdminUser model - Admin access control
+model AdminUser {
+  id           String  @id @default(uuid())
+  telegramId   String  @unique
+  username     String?
+  role         String  @default("admin") // admin, super_admin
+  permissions  Json    @default("[]")
+  passwordHash String? // bcrypt hashed password
+  active       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([telegramId])
+  @@index([active])
+}
+
+// Payout model - Track TON/USDT payouts to winners
+model Payout {
+  id       String  @id @default(uuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticketId String?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  drawId   String?
+  draw     Draw?   @relation(fields: [drawId], references: [id], onDelete: SetNull)
+
+  amount           Float
+  currency         String // "TON" | "USDT"
+  recipientAddress String
+  walletAddress    String? // Alias for recipientAddress for spec compatibility
+
+  // Match info
+  matchCount      Int?   // 1, 2, 3, 4, or 5
+  matchedNumbers  Int[]  @default([]) // Which numbers matched
+
+  txHash String? @unique
+  status String  @default("pending") // pending, processing, completed, failed, cancelled
+
+  attempts    Int     @default(0)
+  retryCount  Int     @default(0) // For spec compatibility
+  maxAttempts Int     @default(3)
+  lastError   String?
+
+  // For large payouts - split into multiple transactions
+  totalAmount Float? // Original total if split
+  splitIndex  Int? // Which part of split (1, 2, 3...)
+  splitTotal  Int? // Total number of splits
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  processedAt DateTime?
+  completedAt DateTime?
+
+  payoutQueue PayoutQueue[]
+
+  @@index([status])
+  @@index([userId, createdAt])
+  @@index([currency])
+}
+
+// Gamification Models
+
+// Quest model - Quest templates
+model Quest {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  title       String
+  description String
+  type        String // daily, weekly, monthly, onetime
+  category    String // tickets, streak, social, onboarding
+  target      Int // target value to complete
+  rewardType  String // xp, ticket, badge
+  rewardValue Int // amount of reward
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userQuests UserQuest[]
+}
+
+// UserQuest model - User progress on quests
+model UserQuest {
+  id          String    @id @default(uuid())
+  userId      String
+  questId     String
+  quest       Quest     @relation(fields: [questId], references: [id], onDelete: Cascade)
+  progress    Int       @default(0)
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  claimed     Boolean   @default(false)
+  claimedAt   DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, questId, expiresAt])
+  @@index([userId])
+  @@index([questId])
+}
+
+// Achievement model - Achievement templates
+model Achievement {
+  id            String   @id @default(uuid())
+  slug          String   @unique
+  name          String
+  nameEn        String
+  title         String
+  description   String
+  descriptionEn String
+  category      String // tickets, wins, streak, referrals, level, spending
+  type          String   @default("progress") // progress, milestone, special
+  target        Int      @default(1) // value needed to unlock (alias for requirement)
+  tier          Int      @default(1) // 1, 2, 3 (bronze, silver, gold)
+  rarity        String   @default("COMMON") // COMMON, RARE, EPIC, LEGENDARY
+  icon          String
+  rewardXp      Int
+  rewardTon     Float    @default(0)
+  rewardTickets Int      @default(0)
+  sortOrder     Int      @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  userAchievements UserAchievement[]
+}
+
+// UserAchievement model
+model UserAchievement {
+  id            String      @id @default(uuid())
+  userId        String
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  unlockedAt    DateTime    @default(now())
+  claimed       Boolean     @default(false)
+  claimedAt     DateTime?
+
+  @@unique([userId, achievementId])
+  @@index([userId])
+}
+
+// UserStreak model - Extended streak tracking
+model UserStreak {
+  id            String    @id @default(uuid())
+  userId        String    @unique
+  currentStreak Int       @default(0)
+  longestStreak Int       @default(0)
+  lastCheckIn   DateTime?
+  totalCheckIns Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+// DailyTask model - Daily task templates
+model DailyTask {
+  id            String   @id @default(uuid())
+  taskId        String   @unique
+  name          String
+  nameEn        String
+  description   String   @default("")
+  descriptionEn String   @default("")
+  type          String // LOGIN, BUY_TICKETS, REFERRAL, CHECK_RESULTS, STREAK
+  target        Int
+  rewardXp      Int
+  rewardTon     Float    @default(0)
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  userDailyTasks UserDailyTask[]
+
+  @@index([taskId])
+  @@index([isActive])
+}
+
+// UserDailyTask model - User progress on daily tasks
+model UserDailyTask {
+  id          String    @id @default(uuid())
+  userId      String
+  dailyTaskId String
+  dailyTask   DailyTask @relation(fields: [dailyTaskId], references: [id], onDelete: Cascade)
+  progress    Int       @default(0)
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  claimed     Boolean   @default(false)
+  claimedAt   DateTime?
+  resetAt     DateTime // When this task should reset (next day)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, dailyTaskId, resetAt])
+  @@index([userId])
+  @@index([dailyTaskId])
+  @@index([resetAt])
+}
+
+// Reward model - Reward templates
+model Reward {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  name        String
+  description String
+  type        String // level_up, streak_milestone, leaderboard, referral
+  rewardType  String // xp, ticket, badge
+  rewardValue Int
+  createdAt   DateTime @default(now())
+
+  userRewards UserReward[]
+}
+
+// UserReward model
+model UserReward {
+  id        String    @id @default(uuid())
+  userId    String
+  rewardId  String?
+  reward    Reward?   @relation(fields: [rewardId], references: [id], onDelete: SetNull)
+  source    String // quest, achievement, streak, level, referral, leaderboard
+  sourceId  String? // ID of quest/achievement/etc
+  type      String // xp, ticket, badge
+  value     Int
+  claimed   Boolean   @default(false)
+  claimedAt DateTime?
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([claimed])
+}
+
+// ReferralRelation model - Referral tree
+model ReferralRelation {
+  id         String   @id @default(uuid())
+  referrerId String // user who invited
+  referredId String // user who was invited
+  status     String   @default("registered") // registered, first_purchase, active
+  bonusPaid  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([referrerId, referredId])
+  @@index([referrerId])
+  @@index([referredId])
+}
+
+// LotteryFund - Track balances for each lottery
+model LotteryFund {
+  id        String  @id @default(uuid())
+  lotteryId String
+  lottery   Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+  currency  String // 'TON' | 'USDT'
+
+  // Current balances
+  totalCollected Float @default(0) // Total tickets sold amount
+  prizePool      Float @default(0) // 50% of collected
+  jackpotPool    Float @default(0) // 15% of prizePool (accumulates)
+  payoutPool     Float @default(0) // 85% of prizePool (for winners)
+  platformPool   Float @default(0) // 50% of collected
+  reservePool    Float @default(0) // 10% of platformPool (accumulates)
+
+  // Statistics
+  totalPaidOut   Float @default(0)
+  totalToReserve Float @default(0)
+  totalToJackpot Float @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([lotteryId, currency])
+  @@index([lotteryId])
+  @@index([currency])
+}
+
+// LotteryPayoutConfig - Prize distribution settings
+model LotteryPayoutConfig {
+  id        String  @id @default(uuid())
+  lotteryId String  @unique
+  lottery   Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+
+  // Main distribution (percentages as decimals)
+  platformShare Float @default(0.50) // 50% to platform
+  prizeShare    Float @default(0.50) // 50% to prizes
+
+  // Platform split
+  reserveShare Float @default(0.10) // 10% of platform → reserve
+  incomeShare  Float @default(0.90) // 90% of platform → income
+
+  // Prize pool split
+  jackpotShare Float @default(0.15) // 15% of prize → jackpot (5/5)
+  payoutShare  Float @default(0.85) // 85% of prize → payouts
+
+  // Payout distribution (of payoutShare)
+  match5Share Float @default(0) // Jackpot handled separately
+  match4Share Float @default(0.60) // 60% to 4/5 winners
+  match3Share Float @default(0.30) // 30% to 3/5 winners
+  match2Share Float @default(0.10) // 10% to 2/5 winners
+  match1Fixed Float @default(0.1) // Fixed 0.1 TON/USDT from reserve
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// DrawSchedule - Schedule configuration
+model DrawSchedule {
+  id        String  @id @default(uuid())
+  lotteryId String  @unique
+  lottery   Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+
+  // Schedule type
+  scheduleType String @default("manual") // 'manual' | 'daily' | 'weekly' | 'custom'
+
+  // Time settings (for automatic)
+  drawTime   String? // '18:00' format
+  timezone   String  @default("Europe/Moscow")
+  daysOfWeek Int[]   @default([]) // 0=Sunday, 6=Saturday. Empty = daily
+
+  // Status
+  enabled    Boolean   @default(false)
+  nextDrawAt DateTime?
+  lastDrawAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// PayoutQueue - Queue for large payouts
+model PayoutQueue {
+  id String @id @default(uuid())
+
+  // Reference
+  drawId   String
+  draw     Draw    @relation(fields: [drawId], references: [id], onDelete: Cascade)
+  userId   String
+  ticketId String
+  payoutId String?
+  payout   Payout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+
+  // Payout details
+  currency        String // 'TON' | 'USDT'
+  walletAddress   String
+  totalAmount     Float // Total amount to pay
+  paidAmount      Float  @default(0) // Amount already paid
+  remainingAmount Float // Amount still to pay
+
+  // Split payment tracking
+  partNumber Int @default(1) // Current part being paid
+  totalParts Int @default(1) // Total parts needed
+
+  // Status
+  status String @default("pending")
+  // pending, processing, partial, completed, failed
+
+  priority Int @default(0) // Higher = pay first
+
+  // Scheduling
+  scheduledFor DateTime?
+  processedAt  DateTime?
+
+  // Transaction info
+  txHash      String?
+  error       String?
+  attempts    Int     @default(0)
+  maxAttempts Int     @default(3)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([scheduledFor])
+  @@index([drawId])
+  @@index([userId])
+}
+
+// NotificationQueue - Telegram notifications
+model NotificationQueue {
+  id         String @id @default(uuid())
+  userId     String
+  telegramId BigInt // Telegram user ID for sending
+
+  // Notification type
+  type String
+  // 'draw_reminder' | 'draw_result' | 'win' | 'payout_sent' | 
+  // 'payout_pending' | 'streak_warning' | 'level_up' | 'referral_joined'
+
+  // Content
+  title   String
+  message String
+  data    Json? // Additional data (draw results, amounts, etc.)
+
+  // Status
+  status      String    @default("pending") // pending, sent, failed
+  sentAt      DateTime?
+  error       String?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+
+  // Scheduling
+  scheduledFor DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+  @@index([scheduledFor])
+  @@index([userId])
+  @@index([telegramId])
+}
+
+// FundTransaction - Audit log for all fund movements
+model FundTransaction {
+  id        String  @id @default(uuid())
+  lotteryId String
+  lottery   Lottery @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+  currency  String // 'TON' | 'USDT'
+  drawId    String? // If related to a draw
+
+  // Transaction details
+  type String
+  // 'ticket_sale' | 'prize_payout' | 'jackpot_rollover' | 
+  // 'to_reserve' | 'from_reserve' | 'to_platform' | 'manual_adjustment'
+
+  amount Float
+
+  // Balance changes
+  fromPool String? // 'prizePool' | 'jackpotPool' | 'payoutPool' | 'reservePool' | 'platformPool'
+  toPool   String?
+
+  // Balances after transaction
+  prizePoolAfter    Float?
+  jackpotPoolAfter  Float?
+  payoutPoolAfter   Float?
+  reservePoolAfter  Float?
+  platformPoolAfter Float?
+
+  // Reference
+  reference String? // ticketId, payoutId, etc.
+  note      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([lotteryId])
+  @@index([drawId])
+  @@index([type])
+  @@index([createdAt])
+}

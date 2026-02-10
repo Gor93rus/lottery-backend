@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lottery-config
+data:
+  NODE_ENV: "production"
+  ENABLE_REDIS_CACHE: "true"
+  ENABLE_COMPRESSION: "true"
+  CACHE_TTL_LOTTERIES: "300"
+  CACHE_TTL_USER_DATA: "600"
+  CACHE_TTL_LEADERBOARD: "1800"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lottery-secrets
+type: Opaque
+stringData:
+  database-url: "postgresql://user:password@postgres:5432/lottery_prod"
+  jwt-secret: "your-secret-key-here"
+  telegram-bot-token: "your-telegram-bot-token"
+  sentry-dsn: "your-sentry-dsn"
+  cdn-api-key: "your-cdn-api-key"
