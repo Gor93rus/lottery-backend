@@ -75,7 +75,11 @@ class TonClientManager {
   /**
    * Set cache value
    */
-  private setCache<T>(key: string, data: T, ttl: number = this.DEFAULT_CACHE_TTL): void {
+  private setCache<T>(
+    key: string,
+    data: T,
+    ttl: number = this.DEFAULT_CACHE_TTL,
+  ): void {
     this.cache.set(key, {
       data,
       timestamp: Date.now(),
@@ -100,7 +104,9 @@ class TonClientManager {
         count++;
       }
     }
-    console.log(`🗑️ Cleared ${count} cache entries matching pattern: ${pattern}`);
+    console.log(
+      `🗑️ Cleared ${count} cache entries matching pattern: ${pattern}`,
+    );
   }
 
   /**
@@ -121,16 +127,16 @@ class TonClientManager {
 
       const backoffTime = Math.min(
         this.rateLimitState.backoffMultiplier * 1000,
-        this.MAX_BACKOFF
+        this.MAX_BACKOFF,
       );
 
       console.warn(
-        `⚠️ TON RPC Rate Limited. Backoff: ${backoffTime}ms. Multiplier: ${this.rateLimitState.backoffMultiplier}x`
+        `⚠️ TON RPC Rate Limited. Backoff: ${backoffTime}ms. Multiplier: ${this.rateLimitState.backoffMultiplier}x`,
       );
 
       this.rateLimitState.backoffMultiplier = Math.min(
         this.rateLimitState.backoffMultiplier * 2,
-        16
+        16,
       );
 
       await new Promise((resolve) => setTimeout(resolve, backoffTime));
@@ -146,12 +152,12 @@ class TonClientManager {
     this.rateLimitState.isLimited = true;
     this.rateLimitState.backoffMultiplier = Math.min(
       this.rateLimitState.backoffMultiplier * 2,
-      16
+      16,
     );
     this.rateLimitState.resetTime = Date.now() + this.TIME_WINDOW;
 
     console.warn(
-      `📛 429 Error! Backoff multiplier increased to ${this.rateLimitState.backoffMultiplier}x`
+      `📛 429 Error! Backoff multiplier increased to ${this.rateLimitState.backoffMultiplier}x`,
     );
   }
 
@@ -161,20 +167,23 @@ class TonClientManager {
   private async retryWithBackoff<T>(
     fn: () => Promise<T>,
     retries = 3,
-    delay = 1000
+    delay = 1000,
   ): Promise<T> {
     try {
       await this.checkRateLimit();
       return await fn();
     } catch (error: any) {
-      if (error?.message?.includes("429") || error?.message?.includes("Too Many Requests")) {
+      if (
+        error?.message?.includes("429") ||
+        error?.message?.includes("Too Many Requests")
+      ) {
         this.handleRateLimitError();
       }
 
       if (retries > 0) {
         console.warn(
           `⚠️ Request failed, retrying in ${delay}ms. Retries left: ${retries}`,
-          error?.message
+          error?.message,
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
         return this.retryWithBackoff(fn, retries - 1, delay * 1.5);
