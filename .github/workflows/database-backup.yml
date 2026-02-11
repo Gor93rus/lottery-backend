@@ -1,11 +1,8 @@
 name: Database Backup
 
 on:
-  # Ежедневно в 03:00 UTC
   schedule:
     - cron: '0 3 * * *'
-  
-  # Ручной запуск
   workflow_dispatch:
     inputs:
       retention_days:
@@ -30,55 +27,56 @@ jobs:
 
       - name: Install PostgreSQL 17 client
         run: |
-          # Add PostgreSQL repository
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
           sudo apt-get update
-          
-          # Install PostgreSQL 17 client (matches Supabase server version)
           sudo apt-get install -y postgresql-client-17
-          
-          # Verify installation
           echo "Installed pg_dump version:"
           /usr/lib/postgresql/17/bin/pg_dump --version
 
+      - name: Ensure DATABASE_URL is set (fallback to DIRECT_URL)
+        run: |
+          # Use secrets.DATABASE_URL if present, otherwise fallback to secrets.DIRECT_URL
+          if [ -z "${{ secrets.DATABASE_URL }}" ] && [ -n "${{ secrets.DIRECT_URL }}" ]; then
+            echo "DATABASE_URL is empty, using DIRECT_URL"
+            echo "DATABASE_URL=${{ secrets.DIRECT_URL }}" >> $GITHUB_ENV
+          elif [ -n "${{ secrets.DATABASE_URL }}" ]; then
+            echo "DATABASE_URL present"
+            echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> $GITHUB_ENV
+          fi
+
+          # Ensure SSL if required by the DB provider
+          echo "PGSSLMODE=require" >> $GITHUB_ENV
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: DATABASE_URL and DIRECT_URL are not set as secrets. Aborting."
+            exit 1
+          fi
+
       - name: Create backup
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ env.DATABASE_URL }}
         run: |
-          # Generate filename with timestamp
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="backup_${TIMESTAMP}.sql"
           BACKUP_FILE_GZ="${BACKUP_FILE}.gz"
 
           echo "📦 Creating backup: ${BACKUP_FILE}"
-          
-          # Use explicit path to PostgreSQL 17 pg_dump
-          /usr/lib/postgresql/17/bin/pg_dump "${DATABASE_URL}" \
-            --no-owner \
-            --no-privileges \
-            --clean \
-            --if-exists \
-            > "${BACKUP_FILE}"
+          /usr/lib/postgresql/17/bin/pg_dump "${DATABASE_URL}" --no-owner --no-privileges --clean --if-exists > "${BACKUP_FILE}"
 
-          # Check if backup was created successfully
           if [ ! -s "${BACKUP_FILE}" ]; then
             echo "❌ Backup file is empty or was not created"
             exit 1
           fi
 
-          # Get file size before compression
           ORIGINAL_SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
           echo "📊 Original size: ${ORIGINAL_SIZE}"
 
-          # Compress backup
           gzip -9 "${BACKUP_FILE}"
 
-          # Get compressed size
           COMPRESSED_SIZE=$(du -h "${BACKUP_FILE_GZ}" | cut -f1)
           echo "📊 Compressed size: ${COMPRESSED_SIZE}"
 
-          # Export variables for next steps
           echo "BACKUP_FILE_GZ=${BACKUP_FILE_GZ}" >> $GITHUB_ENV
           echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
           echo "ORIGINAL_SIZE=${ORIGINAL_SIZE}" >> $GITHUB_ENV
@@ -98,15 +96,9 @@ jobs:
 
             ### How to restore:
             ```bash
-            # Download and extract
             gunzip backup_${{ env.TIMESTAMP }}.sql.gz
-
-            # Restore to database
             psql $DATABASE_URL < backup_${{ env.TIMESTAMP }}.sql
             ```
-
-            ---
-            *Automated backup by GitHub Actions*
           files: ${{ env.BACKUP_FILE_GZ }}
           draft: false
           prerelease: false
@@ -121,50 +113,16 @@ jobs:
             const retentionDays = parseInt(process.env.BACKUP_RETENTION_DAYS) || 14;
             const cutoffDate = new Date();
             cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
-
-            console.log(`🧹 Cleaning up backups older than ${retentionDays} days`);
-            console.log(`📅 Cutoff date: ${cutoffDate.toISOString()}`);
-
-            // Get all releases
-            const releases = await github.rest.repos.listReleases({
-              owner,
-              repo,
-              per_page: 100
-            });
-
-            // Filter backup releases older than retention period
+            const releases = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
             const oldBackups = releases.data.filter(release => {
               if (!release.tag_name.startsWith('backup-')) return false;
               const releaseDate = new Date(release.created_at);
               return releaseDate < cutoffDate;
             });
-
-            console.log(`🗑️ Found ${oldBackups.length} old backups to delete`);
-
-            // Delete old backups
             for (const backup of oldBackups) {
-              console.log(`   Deleting: ${backup.tag_name}`);
-
-              // Delete release
-              await github.rest.repos.deleteRelease({
-                owner,
-                repo,
-                release_id: backup.id
-              });
-
-              // Delete tag
-              try {
-                await github.rest.git.deleteRef({
-                  owner,
-                  repo,
-                  ref: `tags/${backup.tag_name}`
-                });
-              } catch (e) {
-                console.log(`   Tag already deleted or not found: ${backup.tag_name}`);
-              }
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: backup.id });
+              try { await github.rest.git.deleteRef({ owner, repo, ref: `tags/${backup.tag_name}` }); } catch (e) { /* ignore */ }
             }
-
-            console.log('✅ Cleanup complete');
 
       - name: Send notification on failure
         if: failure()
@@ -172,19 +130,9 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-
             await github.rest.issues.create({
-              owner,
-              repo,
+              owner, repo,
               title: '🚨 Database Backup Failed',
-              body: `## Backup Failed
-
-            **Workflow Run:** [View Details](${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID})
-            **Date:** ${new Date().toISOString()}
-
-            Please check the workflow logs for more details.
-
-            ---
-            *Automated notification*`,
+              body: `## Backup Failed\n\n**Workflow Run:** [View Details](${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID})\n**Date:** ${new Date().toISOString()}\n\nPlease check the workflow logs for more details.`,
               labels: ['bug', 'automated']
             });
