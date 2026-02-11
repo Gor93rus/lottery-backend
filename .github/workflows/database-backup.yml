@@ -66,6 +66,8 @@ jobs:
 
       - name: Create backup
         run: |
+          # Uses DATABASE_URL and PGSSLMODE from $GITHUB_ENV set in previous step
+          
           # Generate filename with timestamp
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="backup_${TIMESTAMP}.sql"
