@@ -42,9 +42,29 @@ jobs:
           echo "Installed pg_dump version:"
           /usr/lib/postgresql/17/bin/pg_dump --version
 
-      - name: Create backup
+      - name: Set DATABASE_URL with fallback
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SECRET: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL_SECRET: ${{ secrets.DIRECT_URL }}
+        run: |
+          # Check for DATABASE_URL and fall back to DIRECT_URL
+          if [ -n "$DATABASE_URL_SECRET" ]; then
+            echo "✅ Using DATABASE_URL"
+            echo "DATABASE_URL=${DATABASE_URL_SECRET}" >> $GITHUB_ENV
+          elif [ -n "$DIRECT_URL_SECRET" ]; then
+            echo "⚠️ DATABASE_URL not set, falling back to DIRECT_URL"
+            echo "DATABASE_URL=${DIRECT_URL_SECRET}" >> $GITHUB_ENV
+          else
+            echo "❌ ERROR: Neither DATABASE_URL nor DIRECT_URL is set in repository secrets"
+            echo "Please configure at least one of these secrets in repository settings"
+            exit 1
+          fi
+          
+          # Set PGSSLMODE to require
+          echo "PGSSLMODE=require" >> $GITHUB_ENV
+          echo "✅ PGSSLMODE set to require"
+
+      - name: Create backup
         run: |
           # Generate filename with timestamp
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
