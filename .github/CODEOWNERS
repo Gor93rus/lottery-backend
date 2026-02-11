@@ -1,12 +1,3 @@
-Что сделано:
-- Добавлен .github/CODEOWNERS, который автоматически назначает ревьюера (@Gor93rus) для /src, /prisma и .github/workflows.
-- Обновлён .github/workflows/database-backup.yml: добавлена проверка наличия secrets.DATABASE_URL, fallback на secrets.DIRECT_URL, PGSSLMODE=require, и ранняя ошибка при отсутствии обоих значений.
-
-Причина:
-- Workflow для бэкапов падал, е��ли секрет DATABASE_URL был недоступен в раннере; fallback и ясная ошибка делают job устойчивее.
-- CODEOWNERS упрощает политику ревью при будущих изменениях.
-
-Acceptance criteria:
-- В PR нет секретов.
-- CI/Actions остаются работоспособны.
-- Просьба ревью у @Gor93rus.
+/src/ @Gor93rus
+/prisma/ @Gor93rus
+/.github/workflows/ @Gor93rus
