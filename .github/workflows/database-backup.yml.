@@ -1,0 +1,134 @@
+name: Database Backup
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Days to keep old backups'
+        required: false
+        default: '14'
+
+env:
+  BACKUP_RETENTION_DAYS: ${{ github.event.inputs.retention_days || '14' }}
+
+jobs:
+  backup:
+    name: Backup Database
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo "Installed pg_dump version:"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+
+      - name: Ensure DATABASE_URL is set (fallback to DIRECT_URL)
+        run: |
+          if [ -z "${{ secrets.DATABASE_URL }}" ] && [ -n "${{ secrets.DIRECT_URL }}" ]; then
+            echo "DATABASE_URL is empty, using DIRECT_URL"
+            echo "DATABASE_URL=${{ secrets.DIRECT_URL }}" >> $GITHUB_ENV
+          elif [ -n "${{ secrets.DATABASE_URL }}" ]; then
+            echo "DATABASE_URL present"
+            echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> $GITHUB_ENV
+          fi
+
+          echo "PGSSLMODE=require" >> $GITHUB_ENV
+
+          if [ -z "${{ secrets.DATABASE_URL }}" ] && [ -z "${{ secrets.DIRECT_URL }}" ]; then
+            echo "ERROR: DATABASE_URL and DIRECT_URL are not set as secrets. Aborting."
+            exit 1
+          fi
+
+      - name: Create backup
+        run: |
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="backup_${TIMESTAMP}.sql"
+          BACKUP_FILE_GZ="${BACKUP_FILE}.gz"
+
+          echo "📦 Creating backup: ${BACKUP_FILE}"
+          /usr/lib/postgresql/17/bin/pg_dump "${DATABASE_URL}" --no-owner --no-privileges --clean --if-exists > "${BACKUP_FILE}"
+
+          if [ ! -s "${BACKUP_FILE}" ]; then
+            echo "❌ Backup file is empty or was not created"
+            exit 1
+          fi
+
+          ORIGINAL_SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+          echo "📊 Original size: ${ORIGINAL_SIZE}"
+
+          gzip -9 "${BACKUP_FILE}"
+
+          COMPRESSED_SIZE=$(du -h "${BACKUP_FILE_GZ}" | cut -f1)
+          echo "📊 Compressed size: ${COMPRESSED_SIZE}"
+
+          echo "BACKUP_FILE_GZ=${BACKUP_FILE_GZ}" >> $GITHUB_ENV
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+          echo "ORIGINAL_SIZE=${ORIGINAL_SIZE}" >> $GITHUB_ENV
+          echo "COMPRESSED_SIZE=${COMPRESSED_SIZE}" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: backup-${{ env.TIMESTAMP }}
+          name: "🗄️ Database Backup ${{ env.TIMESTAMP }}"
+          body: |
+            ## Automatic Database Backup
+
+            **Date:** ${{ env.TIMESTAMP }}
+            **Original Size:** ${{ env.ORIGINAL_SIZE }}
+            **Compressed Size:** ${{ env.COMPRESSED_SIZE }}
+
+            ### How to restore:
+            ```bash
+            gunzip backup_${{ env.TIMESTAMP }}.sql.gz
+            psql $DATABASE_URL < backup_${{ env.TIMESTAMP }}.sql
+            ```
+          files: ${{ env.BACKUP_FILE_GZ }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup old backups
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const retentionDays = parseInt(process.env.BACKUP_RETENTION_DAYS) || 14;
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+            const releases = await github.rest.repos.listReleases({ owner, repo, per_page: 100 });
+            const oldBackups = releases.data.filter(release => {
+              if (!release.tag_name.startsWith('backup-')) return false;
+              const releaseDate = new Date(release.created_at);
+              return releaseDate < cutoffDate;
+            });
+            for (const backup of oldBackups) {
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: backup.id });
+              try { await github.rest.git.deleteRef({ owner, repo, ref: `tags/${backup.tag_name}` }); } catch (e) { /* ignore */ }
+            }
+
+      - name: Send notification on failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            await github.rest.issues.create({
+              owner, repo,
+              title: '🚨 Database Backup Failed',
+              body: `## Backup Failed\n\n**Workflow Run:** [View Details](${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID})\n**Date:** ${new Date().toISOString()}\n\nPlease check the workflow logs for more details.`,
+              labels: ['bug', 'automated']
+            });
