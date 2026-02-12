@@ -1,0 +1,131 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+  
+  # Manual trigger
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  deploy:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Generate Prisma Client
+        run: npx prisma generate
+      
+      - name: Run database migrations (staging)
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "⚠️ STAGING_DATABASE_URL not configured. Skipping migrations."
+            echo "Add STAGING_DATABASE_URL to staging environment secrets to enable migrations."
+            exit 0
+          fi
+          
+          echo "🔄 Running Prisma migrations on staging database..."
+          npx prisma migrate deploy
+          echo "✅ Migrations completed successfully"
+      
+      - name: Build application
+        run: |
+          echo "🏗️ Building application..."
+          npm run build
+          echo "✅ Build completed successfully"
+      
+      - name: Deploy to staging platform
+        env:
+          STAGING_DEPLOY_HOOK: ${{ secrets.STAGING_DEPLOY_HOOK }}
+          RENDER_API_KEY: ${{ secrets.RENDER_STAGING_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_STAGING_SERVICE_ID }}
+        run: |
+          if [ -n "$STAGING_DEPLOY_HOOK" ]; then
+            echo "🚀 Triggering staging deployment via webhook..."
+            curl -X POST "$STAGING_DEPLOY_HOOK"
+            echo "✅ Deployment triggered"
+          elif [ -n "$RENDER_API_KEY" ] && [ -n "$RENDER_SERVICE_ID" ]; then
+            echo "🚀 Deploying to Render staging..."
+            if [ -f "./scripts/deploy_to_render.sh" ]; then
+              chmod +x ./scripts/deploy_to_render.sh
+              ./scripts/deploy_to_render.sh
+            else
+              echo "⚠️ Deploy script not found"
+            fi
+          else
+            echo "ℹ️ No staging deployment configured."
+            echo "To enable automatic deployment, add one of:"
+            echo "  - STAGING_DEPLOY_HOOK (webhook URL)"
+            echo "  - RENDER_STAGING_API_KEY + RENDER_STAGING_SERVICE_ID"
+            echo "to staging environment secrets"
+          fi
+      
+      - name: Wait for deployment
+        run: |
+          echo "⏳ Waiting 20 seconds for deployment to stabilize..."
+          sleep 20
+      
+      - name: Run smoke tests
+        env:
+          STAGING_URL: ${{ secrets.STAGING_URL }}
+        run: |
+          if [ -z "$STAGING_URL" ]; then
+            echo "⚠️ STAGING_URL not configured. Skipping smoke tests."
+            echo "Add STAGING_URL to staging environment secrets to enable health checks."
+            exit 0
+          fi
+          
+          echo "🏥 Running smoke tests on staging..."
+          
+          # Test health endpoint
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${STAGING_URL}/health" || echo "000")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "❌ Health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          
+          # Test API root
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${STAGING_URL}/" || echo "000")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ API root check passed (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ API root check returned HTTP $HTTP_CODE"
+          fi
+          
+          echo "✅ Staging smoke tests passed"
+      
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Staging Deployment Summary"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Status: ${{ job.status }}"
