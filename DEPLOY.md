@@ -34,10 +34,29 @@ This document outlines the complete deployment process for the lottery-backend a
    - Name: `production`
    - Click **Configure environment**
 
-3. **Set up Environment Protection Rules**
-   - ✅ **Required reviewers**: Add at least one reviewer (e.g., @Gor93rus)
-   - ✅ **Wait timer**: Optional, set to 0 for immediate deployment after approval
-   - ✅ **Deployment branches**: Select "Selected branches" and add `main`
+3. **Set up Environment Protection Rules** ⚠️ **CRITICAL FOR PRODUCTION SAFETY**
+   
+   **Required Reviewers** (Highly Recommended):
+   - ✅ Enable "Required reviewers"
+   - Add at least one reviewer (e.g., @Gor93rus)
+   - Requires manual approval before any production deployment
+   - Prevents accidental deployments from automated processes
+   
+   **Wait Timer** (Optional):
+   - Set to 0 for immediate deployment after approval
+   - Or set a delay (e.g., 5 minutes) to allow for last-minute cancellation
+   
+   **Deployment Branches** (Recommended):
+   - ✅ Enable "Deployment branches and tags"
+   - Select "Selected branches and tags"
+   - Add `main` branch to whitelist
+   - This prevents deployments from feature branches or pull requests
+   
+   **Why These Rules Matter**:
+   - The production deployment workflow uses `workflow_dispatch` (manual trigger only)
+   - These protection rules add an additional approval layer
+   - Prevents accidental production deployments
+   - Ensures code review before production changes
 
 4. **Add Environment Secrets**
    
@@ -120,14 +139,24 @@ For `develop` or `staging` branch:
    - Auto-cleanup after 14 days
 
 2. **Production Deployment** (`.github/workflows/deploy-prod.yml`)
-   - Manual trigger or tag-based (`release-*`)
+   - **Manual trigger only** (workflow_dispatch)
    - Requires production environment approval
    - Includes backup verification, migrations, build, deploy, smoke tests
+   - **Note**: Automatic tag-based triggers removed for safety
 
 3. **Staging Deployment** (`.github/workflows/deploy-staging.yml`)
    - Auto-triggers on push to `develop` or `staging` branch
    - No approval required
    - For testing and validation
+
+4. **Database Restore Test** (`.github/workflows/restore-test.yml`)
+   - Runs weekly on Saturday nights at 02:00 UTC
+   - Downloads latest backup from GitHub Releases
+   - Validates SQL syntax and backup integrity
+   - Optionally tests restore to staging database if TEST_DATABASE_URL is configured
+   - Creates GitHub issue if test fails
+
+For detailed operational procedures, see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Production Deployment
 
