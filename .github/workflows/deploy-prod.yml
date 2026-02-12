@@ -1,0 +1,205 @@
+name: Deploy to Production
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      skip_backup_check:
+        description: 'Skip backup confirmation (not recommended)'
+        required: false
+        type: boolean
+        default: false
+  
+  # Automatic trigger on release tags
+  push:
+    tags:
+      - 'release-*'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+    
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      
+      - name: Verify backup exists
+        if: ${{ !inputs.skip_backup_check }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            
+            // Get recent releases
+            const releases = await github.rest.repos.listReleases({
+              owner,
+              repo,
+              per_page: 10
+            });
+            
+            // Check for recent backup (within last 24 hours)
+            const now = new Date();
+            const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            
+            const recentBackup = releases.data.find(release => {
+              if (!release.tag_name.startsWith('backup-')) return false;
+              const releaseDate = new Date(release.created_at);
+              return releaseDate > oneDayAgo;
+            });
+            
+            if (!recentBackup) {
+              core.setFailed('⚠️ No recent backup found (within last 24 hours). Please run the Database Backup workflow first or use skip_backup_check=true if you have verified a backup exists.');
+              return;
+            }
+            
+            console.log(`✅ Recent backup found: ${recentBackup.tag_name}`);
+            console.log(`   Created: ${recentBackup.created_at}`);
+      
+      - name: Manual backup confirmation
+        if: ${{ inputs.skip_backup_check }}
+        run: |
+          echo "⚠️ WARNING: Backup check was skipped!"
+          echo "Please ensure a recent database backup exists before proceeding."
+          echo "You can verify backups at: https://github.com/${{ github.repository }}/releases"
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Generate Prisma Client
+        run: npx prisma generate
+      
+      - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "🔄 Running Prisma migrations..."
+          npx prisma migrate deploy
+          echo "✅ Migrations completed successfully"
+      
+      - name: Build application
+        run: |
+          echo "🏗️ Building application..."
+          npm run build
+          echo "✅ Build completed successfully"
+      
+      - name: Deploy to Render
+        if: ${{ secrets.RENDER_API_KEY != '' }}
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          if [ -f "./scripts/deploy_to_render.sh" ]; then
+            echo "🚀 Deploying to Render..."
+            chmod +x ./scripts/deploy_to_render.sh
+            ./scripts/deploy_to_render.sh
+          else
+            echo "⚠️ Deploy script not found. Skipping Render deployment."
+            echo "Please create scripts/deploy_to_render.sh or deploy manually."
+          fi
+      
+      - name: Deploy instructions (if no API key)
+        if: ${{ secrets.RENDER_API_KEY == '' }}
+        run: |
+          echo "ℹ️ RENDER_API_KEY not configured."
+          echo "To enable automatic deployment:"
+          echo "1. Add RENDER_API_KEY to production environment secrets"
+          echo "2. Add RENDER_SERVICE_ID to production environment secrets"
+          echo "3. Re-run this workflow"
+          echo ""
+          echo "For manual deployment, see DEPLOY.md"
+      
+      - name: Wait for deployment
+        if: ${{ secrets.RENDER_API_KEY != '' }}
+        run: |
+          echo "⏳ Waiting 30 seconds for deployment to stabilize..."
+          sleep 30
+      
+      - name: Run smoke tests
+        env:
+          HEALTH_CHECK_URL: ${{ secrets.PRODUCTION_URL }}
+        run: |
+          if [ -z "$HEALTH_CHECK_URL" ]; then
+            echo "⚠️ PRODUCTION_URL not configured. Skipping smoke tests."
+            echo "Add PRODUCTION_URL to production environment secrets to enable health checks."
+            exit 0
+          fi
+          
+          echo "🏥 Running smoke tests..."
+          
+          # Test health endpoint
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HEALTH_CHECK_URL}/health" || echo "000")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "❌ Health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          
+          # Test API root
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HEALTH_CHECK_URL}/" || echo "000")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ API root check passed (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ API root check returned HTTP $HTTP_CODE"
+          fi
+          
+          echo "✅ All smoke tests passed"
+      
+      - name: Notify on success
+        if: success()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            
+            console.log('✅ Production deployment completed successfully!');
+            console.log(`   Run: ${runUrl}`);
+            console.log(`   Commit: ${context.sha}`);
+      
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: '🚨 Production Deployment Failed',
+              body: `## Production Deployment Failed
+            
+            **Workflow Run:** [View Details](${runUrl})
+            **Commit:** ${context.sha}
+            **Triggered by:** @${context.actor}
+            **Date:** ${new Date().toISOString()}
+            
+            Please check the workflow logs for more details and take appropriate action.
+            
+            ### Rollback Instructions
+            See [DEPLOY.md](../blob/main/DEPLOY.md#rollback-procedure) for rollback procedures.
+            
+            ---
+            *Automated notification from deployment workflow*`,
+              labels: ['bug', 'production', 'automated']
+            });

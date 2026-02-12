@@ -29,6 +29,10 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # Ignore problematic packages that cause breaking changes
+      - dependency-name: "tough-cookie"
+      - dependency-name: "qs"
+      - dependency-name: "form-data"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
