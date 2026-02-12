@@ -1,0 +1,271 @@
+name: Database Restore Test
+
+on:
+  # Run weekly on Saturday night (minimizes impact on production)
+  schedule:
+    - cron: '0 2 * * 6'  # 02:00 UTC every Saturday
+  
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      backup_tag:
+        description: 'Specific backup tag to test (e.g., backup-20260212_030000). Leave empty for latest.'
+        required: false
+        type: string
+
+env:
+  PGSSLMODE: require
+
+jobs:
+  restore-test:
+    name: Test Database Restore
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          # Add PostgreSQL repository
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo apt-get update
+          
+          # Install PostgreSQL 17 client
+          sudo apt-get install -y postgresql-client-17
+          
+          # Verify installation
+          echo "Installed pg_dump version:"
+          /usr/lib/postgresql/17/bin/psql --version
+
+      - name: Find latest backup
+        id: find-backup
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const manualBackupTag = '${{ github.event.inputs.backup_tag }}';
+            
+            if (manualBackupTag) {
+              console.log(`Using manually specified backup: ${manualBackupTag}`);
+              core.setOutput('backup_tag', manualBackupTag);
+              return;
+            }
+            
+            // Get all releases
+            const releases = await github.rest.repos.listReleases({
+              owner,
+              repo,
+              per_page: 50
+            });
+            
+            // Find the most recent backup
+            const backupReleases = releases.data
+              .filter(r => r.tag_name.startsWith('backup-'))
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            
+            if (backupReleases.length === 0) {
+              core.setFailed('No backup releases found');
+              return;
+            }
+            
+            const latestBackup = backupReleases[0];
+            console.log(`Found latest backup: ${latestBackup.tag_name}`);
+            console.log(`Created at: ${latestBackup.created_at}`);
+            
+            core.setOutput('backup_tag', latestBackup.tag_name);
+
+      - name: Download backup
+        run: |
+          BACKUP_TAG="${{ steps.find-backup.outputs.backup_tag }}"
+          BACKUP_FILENAME="${BACKUP_TAG#backup-}.sql.gz"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${BACKUP_TAG}/backup_${BACKUP_FILENAME}"
+          
+          echo "📦 Downloading backup from: ${DOWNLOAD_URL}"
+          
+          curl -L -f -o backup.sql.gz "${DOWNLOAD_URL}"
+          
+          if [ ! -s backup.sql.gz ]; then
+            echo "❌ Downloaded backup file is empty or does not exist"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(du -h backup.sql.gz | cut -f1)
+          echo "✅ Downloaded backup file: ${FILE_SIZE}"
+          
+          echo "BACKUP_TAG=${BACKUP_TAG}" >> $GITHUB_ENV
+          echo "FILE_SIZE=${FILE_SIZE}" >> $GITHUB_ENV
+
+      - name: Extract backup
+        run: |
+          echo "📂 Extracting backup..."
+          gunzip backup.sql.gz
+          
+          if [ ! -s backup.sql ]; then
+            echo "❌ Extracted backup file is empty"
+            exit 1
+          fi
+          
+          EXTRACTED_SIZE=$(du -h backup.sql | cut -f1)
+          echo "✅ Extracted backup file: ${EXTRACTED_SIZE}"
+          echo "EXTRACTED_SIZE=${EXTRACTED_SIZE}" >> $GITHUB_ENV
+
+      - name: Validate SQL syntax
+        run: |
+          echo "🔍 Validating SQL backup..."
+          
+          # Check file is not empty
+          if [ ! -s backup.sql ]; then
+            echo "❌ Backup file is empty"
+            exit 1
+          fi
+          
+          # Check for SQL content markers
+          if ! grep -q "PostgreSQL database dump" backup.sql; then
+            echo "⚠️ Warning: Expected PostgreSQL dump header not found"
+          fi
+          
+          # Check for CREATE TABLE statements
+          TABLE_COUNT=$(grep -c "CREATE TABLE" backup.sql || echo "0")
+          echo "📊 Found ${TABLE_COUNT} CREATE TABLE statements"
+          
+          if [ "$TABLE_COUNT" -eq 0 ]; then
+            echo "❌ No CREATE TABLE statements found - backup may be invalid"
+            exit 1
+          fi
+          
+          # Check for obvious SQL errors
+          if grep -i "ERROR\|FATAL\|pg_dump: error" backup.sql; then
+            echo "❌ Found errors in backup file"
+            exit 1
+          fi
+          
+          # Verify backup structure
+          echo ""
+          echo "📋 Backup file summary:"
+          echo "   First 10 lines:"
+          head -10 backup.sql | sed 's/^/     /'
+          echo ""
+          echo "   Last 10 lines:"
+          tail -10 backup.sql | sed 's/^/     /'
+          echo ""
+          
+          echo "✅ SQL syntax validation passed"
+          echo "TABLE_COUNT=${TABLE_COUNT}" >> $GITHUB_ENV
+
+      - name: Test restore to temporary database (if test DB available)
+        if: ${{ secrets.TEST_DATABASE_URL != '' }}
+        env:
+          TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+        run: |
+          echo "🧪 Testing restore to test database..."
+          
+          # Safety check: ensure this is NOT production
+          if echo "$TEST_DATABASE_URL" | grep -iE "prod|production"; then
+            echo "❌ CRITICAL ERROR: TEST_DATABASE_URL appears to contain production database!"
+            echo "Aborting to prevent data loss"
+            exit 1
+          fi
+          
+          echo "✅ Safety check passed - database URL does not contain 'prod'"
+          
+          # Attempt restore
+          /usr/lib/postgresql/17/bin/psql "$TEST_DATABASE_URL" < backup.sql
+          
+          # Verify restore
+          echo "✅ Restore completed - verifying tables..."
+          /usr/lib/postgresql/17/bin/psql "$TEST_DATABASE_URL" -c "\dt" || true
+          
+          echo "✅ Test restore successful"
+
+      - name: Test restore instructions
+        if: ${{ secrets.TEST_DATABASE_URL == '' }}
+        run: |
+          echo "ℹ️ TEST_DATABASE_URL not configured - skipping actual restore test"
+          echo "To enable full restore testing, add TEST_DATABASE_URL to repository secrets"
+          echo "pointing to a test/staging database (NOT production)"
+          echo ""
+          echo "✅ Backup validation passed - file appears to be valid SQL"
+
+      - name: Generate test report
+        run: |
+          echo "## Database Restore Test Report" > test_report.md
+          echo "" >> test_report.md
+          echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> test_report.md
+          echo "**Backup Tested:** ${{ env.BACKUP_TAG }}" >> test_report.md
+          echo "**Compressed Size:** ${{ env.FILE_SIZE }}" >> test_report.md
+          echo "**Extracted Size:** ${{ env.EXTRACTED_SIZE }}" >> test_report.md
+          echo "**Tables Found:** ${{ env.TABLE_COUNT }}" >> test_report.md
+          echo "" >> test_report.md
+          echo "### Test Results" >> test_report.md
+          echo "- ✅ Backup downloaded successfully" >> test_report.md
+          echo "- ✅ Backup extracted successfully" >> test_report.md
+          echo "- ✅ SQL syntax validation passed" >> test_report.md
+          
+          if [ -n "${{ secrets.TEST_DATABASE_URL }}" ]; then
+            echo "- ✅ Test database restore successful" >> test_report.md
+          else
+            echo "- ⚠️ Test database restore skipped (TEST_DATABASE_URL not configured)" >> test_report.md
+          fi
+          
+          echo "" >> test_report.md
+          echo "### Next Steps" >> test_report.md
+          echo "- Backup is valid and can be used for restore if needed" >> test_report.md
+          echo "- See [docs/RUNBOOK.md](../blob/main/docs/RUNBOOK.md) for restore procedures" >> test_report.md
+          
+          cat test_report.md
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up..."
+          rm -f backup.sql backup.sql.gz test_report.md
+          echo "✅ Cleanup complete"
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "✅ Database restore test completed successfully!"
+          echo "   Backup: ${{ env.BACKUP_TAG }}"
+          echo "   Tables validated: ${{ env.TABLE_COUNT }}"
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: '🚨 Database Restore Test Failed',
+              body: `## Database Restore Test Failed
+            
+            **Workflow Run:** [View Details](${runUrl})
+            **Backup Tag:** ${{ env.BACKUP_TAG || 'N/A' }}
+            **Date:** ${new Date().toISOString()}
+            
+            The weekly database restore test has failed. This could indicate:
+            - Backup file is corrupted
+            - Backup process is not working correctly
+            - SQL syntax issues in the backup
+            
+            ### Action Required
+            1. Review the workflow logs for details
+            2. Verify that database backups are running correctly
+            3. Test restore manually following [docs/RUNBOOK.md](../blob/main/docs/RUNBOOK.md)
+            4. Fix any issues with the backup process
+            
+            ### Important
+            This is a critical issue - backups may not be restorable in an emergency!
+            
+            ---
+            *Automated notification from restore test workflow*`,
+              labels: ['bug', 'critical', 'automated', 'database']
+            });

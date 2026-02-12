@@ -47,17 +47,3 @@ updates:
     labels:
       - "ci"
       - "automated"
-
-  # Docker (if Dockerfile exists)
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Europe/Moscow"
-    commit-message:
-      prefix: "chore(docker):"
-    labels:
-      - "docker"
-      - "automated"

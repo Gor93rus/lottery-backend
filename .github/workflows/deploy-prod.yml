@@ -1,7 +1,7 @@
 name: Deploy to Production
 
 on:
-  # Manual trigger
+  # Manual trigger only - prevents accidental production deployments
   workflow_dispatch:
     inputs:
       skip_backup_check:
@@ -9,11 +9,6 @@ on:
         required: false
         type: boolean
         default: false
-  
-  # Automatic trigger on release tags
-  push:
-    tags:
-      - 'release-*'
 
 env:
   NODE_VERSION: '20'
